@@ -4,6 +4,7 @@ import (
 	"context"
 	. "geerpc" // 调用的时候可以省略包的名字
 	"io"
+	"reflect"
 	"sync"
 )
 
@@ -65,4 +66,39 @@ func (xc *XClient) Call(ctx context.Context, serviceMethod string, args, reply i
 		return err
 	}
 	return xc.call(rpcAddr, ctx, serviceMethod, args, reply)
+}
+
+func (xc *XClient) Broadcast(ctx context.Context, serviceMethod string, args, reply interface{}) error {
+	servers, err := xc.d.GetAll()
+	if err != nil {
+		return err
+	}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var e error
+	replyDone := reply == nil
+	ctx, cancel := context.WithCancel(ctx)
+	for _, rpcAddr := range servers {
+		wg.Add(1)
+		go func(rpcAddr string) {
+			defer wg.Done()
+			var clonedReply interface{}
+			if reply != nil {
+				clonedReply = reflect.New(reflect.ValueOf(reply).Elem().Type()).Interface()
+			}
+			err := xc.call(rpcAddr, ctx, serviceMethod, args, clonedReply)
+			mu.Lock()
+			if err != nil && e == nil {
+				e = err
+				cancel()
+			}
+			if err == nil && !replyDone {
+				reflect.ValueOf(reply).Elem().Set(reflect.ValueOf(clonedReply).Elem())
+				replyDone = true
+			}
+			mu.Unlock()
+		}(rpcAddr)
+	}
+	wg.Wait()
+	return e
 }
